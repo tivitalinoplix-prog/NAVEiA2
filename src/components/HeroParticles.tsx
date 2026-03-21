@@ -1,196 +1,160 @@
 import React, { useEffect, useRef } from 'react';
 
+// ─── Asymmetric pulse envelope ────────────────────────────────────────────────
+// cycle: 0→1→1(hold)→0 with: slow build (3s), fast burst (0.5s), hold full (5s), slow decay (2s)
+function pulseEnvelope(t: number): number {
+  const period = 10.5; // total cycle seconds
+  const phase = t % period;
+  if (phase < 3.0)   return Math.pow(phase / 3.0, 2);                    // build
+  if (phase < 3.5)   return 1.0;                                          // burst peak
+  if (phase < 8.5)   return 1.0;                                          // HOLD expanded
+  return Math.pow(1 - (phase - 8.5) / 2.0, 1.5);                         // decay
+}
+
 export function HeroParticles() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    // Optimization: use desynchronized for lower latency if supported
+    const parent = canvas.parentElement;
+    if (!parent) return;
     const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
     if (!ctx) return;
 
-    let w = canvas.width = window.innerWidth;
-    let h = canvas.height = window.innerHeight;
-    
-    let mouse = { x: -1000, y: -1000, prevX: -1000, prevY: -1000, speed: 0 };
-    
+    // ── Size canvas to its PARENT SECTION, not the viewport ──────────────────
+    // This is critical: the canvas lives inside the hero section (position:absolute inset-0)
+    // so its coordinate space is the section, not the full page.
+    let w = 0, h = 0;
+
+    function sizeCanvas() {
+      const rect = parent!.getBoundingClientRect();
+      w = canvas!.width  = Math.round(rect.width);
+      h = canvas!.height = Math.round(rect.height);
+    }
+    sizeCanvas();
+
+    let mouse = { x: -9999, y: -9999, prevX: -9999, prevY: -9999, speed: 0 };
+
+    // Mouse coords relative to the SECTION, not the viewport
     const onMouseMove = (e: MouseEvent) => {
-      mouse.x = e.clientX;
-      mouse.y = e.clientY;
+      const rect = parent!.getBoundingClientRect();
+      mouse.x = e.clientX - rect.left;
+      mouse.y = e.clientY - rect.top;
     };
-    const onMouseLeave = () => {
-      mouse.x = -1000;
-      mouse.y = -1000;
-    };
+    const onMouseLeave = () => { mouse.x = -9999; mouse.y = -9999; };
     window.addEventListener('mousemove', onMouseMove, { passive: true });
-    window.addEventListener('mouseout', onMouseLeave, { passive: true });
+    window.addEventListener('mouseout',  onMouseLeave, { passive: true });
 
-    // Responsive positioning: move up and left on mobile to align with glasses
     let isMobile = w < 768;
-    let cx = isMobile ? w * 0.65 : w * 0.65; // Fixed at 0.65
-    let cy = isMobile ? h * 0.30 : h * 0.30; // Fixed at 0.30
-    let clusterRadiusX = isMobile ? w * 0.4 : w * 0.25;
-    let clusterRadiusY = clusterRadiusX * 0.25; // Flattened vertically
 
-    const onResize = () => {
-      w = canvas.width = window.innerWidth;
-      h = canvas.height = window.innerHeight;
+    // ── Anchor point: óculos do personagem ───────────────────────────────────
+    // Desktop: personagem ocupa lado direito ~55–80% X, óculos ~35–42% Y da section
+    // Mobile : personagem centralizado, óculos ~28–32% Y
+    let cx = 0, cy = 0;
+    let clusterRadiusX = 0, clusterRadiusY = 0;
+
+    function recalcOrigin() {
       isMobile = w < 768;
-      cx = isMobile ? w * 0.65 : w * 0.65;
-      cy = isMobile ? h * 0.30 : h * 0.30;
-      clusterRadiusX = isMobile ? w * 0.4 : w * 0.25;
-      clusterRadiusY = clusterRadiusX * 0.25;
-      init();
-    };
+      cx = isMobile ? w * 0.54 : w * 0.66;
+      cy = isMobile ? h * 0.30 : h * 0.38;
+      clusterRadiusX = isMobile ? w * 0.30 : w * 0.22;
+      clusterRadiusY = clusterRadiusX * 0.22; // muito achatado horizontalmente
+    }
+    recalcOrigin();
+
+    const onResize = () => { sizeCanvas(); recalcOrigin(); init(); };
     window.addEventListener('resize', onResize, { passive: true });
 
+    // ── Particle class ────────────────────────────────────────────────────────
     class Particle {
-      x!: number;
-      y!: number;
-      baseX!: number;
-      baseY!: number;
-      size!: number;
-      density!: number;
-      baseOpacity!: number;
-      baseHue!: number;
-      angle!: number;
-      distanceX!: number;
-      distanceY!: number;
-      speed!: number;
-      wobbleSpeed!: number;
-      wobbleAngle!: number;
-      baseHue!: number;
-      oscillationSpeedX!: number;
-      oscillationSpeedY!: number;
-      oscillationPhaseX!: number;
-      oscillationPhaseY!: number;
-      life!: number;
-      maxLife!: number;
+      x = 0; y = 0; baseX = 0; baseY = 0;
+      size = 0; density = 0; baseOpacity = 0; baseHue = 0;
+      angle = 0; distanceX = 0; distanceY = 0; speed = 0;
+      wobbleSpeed = 0; wobbleAngle = 0;
+      oscSpeedX = 0; oscSpeedY = 0;
+      oscPhaseX = 0; oscPhaseY = 0;
+      life = 0; maxLife = 0;
 
-      constructor(index: number) {
-        this.init(true, index);
-      }
+      constructor(idx: number) { this.reset(true, idx); }
 
-      init(isFirstSpawn = false, index = 0) {
+      reset(firstSpawn = false, idx = 0) {
         this.angle = Math.random() * Math.PI * 2;
-        // Concentrate much more towards the beam/flare
-        let distFactor = Math.pow(Math.random(), 2.5); // Higher power = closer to center
-        this.distanceX = distFactor * clusterRadiusX * 0.6; 
-        this.distanceY = distFactor * clusterRadiusY * 0.6;
-        
+        const distFactor = Math.pow(Math.random(), 2.2);
+        this.distanceX = distFactor * clusterRadiusX;
+        this.distanceY = distFactor * clusterRadiusY;
         this.baseX = cx + Math.cos(this.angle) * this.distanceX;
         this.baseY = cy + Math.sin(this.angle) * this.distanceY;
         this.x = this.baseX;
         this.y = this.baseY;
-        
-        // Consistent size: 0.5px to 1.5px
-        this.size = Math.random() * 1.0 + 0.5;
-        this.density = (Math.random() * 30) + 1;
-        
-        this.baseOpacity = Math.random() * 0.3 + 0.2; // 0.2 to 0.5
-        
-        // Restore old colors (Red/Amber/Orange)
-        const rand = Math.random();
-        if (rand < 0.60) {
-          this.baseHue = 355; // Deep Red
-        } else if (rand < 0.85) {
-          this.baseHue = 33; // Amber-Orange
-        } else {
-          this.baseHue = 15; // Red-Orange
-        }
-        
-        this.speed = (Math.random() * 0.004) - 0.002;
-        this.wobbleSpeed = Math.random() * 0.05;
-        this.wobbleAngle = Math.random() * Math.PI * 2;
-
-        this.oscillationSpeedX = Math.random() * 0.02 + 0.01;
-        this.oscillationSpeedY = Math.random() * 0.02 + 0.01;
-        this.oscillationPhaseX = Math.random() * Math.PI * 2;
-        this.oscillationPhaseY = Math.random() * Math.PI * 2;
-
-        this.maxLife = 150 + Math.random() * 250;
-        this.life = isFirstSpawn ? Math.random() * this.maxLife : 0;
+        this.size = 0.6 + Math.random() * 1.2;
+        this.density = Math.random() * 30 + 1;
+        this.baseOpacity = 0.25 + Math.random() * 0.35;
+        // Color palette: 60% deep red, 25% amber, 15% red-orange
+        const r = idx % 20;
+        this.baseHue = r < 12 ? 355 : r < 17 ? 33 : 15;
+        this.speed = (Math.random() * 0.005) - 0.0025;
+        this.wobbleSpeed  = Math.random() * 0.06;
+        this.wobbleAngle  = Math.random() * Math.PI * 2;
+        this.oscSpeedX    = Math.random() * 0.018 + 0.008;
+        this.oscSpeedY    = Math.random() * 0.010 + 0.004;
+        this.oscPhaseX    = Math.random() * Math.PI * 2;
+        this.oscPhaseY    = Math.random() * Math.PI * 2;
+        this.maxLife = 160 + Math.random() * 280;
+        this.life = firstSpawn ? Math.random() * this.maxLife : 0;
       }
 
-      updateAndDraw(globalTime: number, index: number, mouseSpeed: number) {
+      draw(globalTime: number, idx: number, mSpeed: number, pulse: number) {
         this.life++;
-        if (this.life >= this.maxLife) {
-          this.init(false, index);
-        }
+        if (this.life >= this.maxLife) { this.reset(false, idx); }
 
-        let lifeProgress = this.life / this.maxLife;
-        let currentOpacity = this.baseOpacity;
-        // Smooth fade in and out
-        if (lifeProgress < 0.1) currentOpacity *= (lifeProgress / 0.1);
-        else if (lifeProgress > 0.9) currentOpacity *= ((1 - lifeProgress) / 0.1);
+        const lp = this.life / this.maxLife;
+        let opacity = this.baseOpacity;
+        if (lp < 0.08) opacity *= lp / 0.08;
+        else if (lp > 0.92) opacity *= (1 - lp) / 0.08;
 
-        // Slowly rotate the base position around the center
-        this.angle += this.speed;
+        // Pulse expands the orbit — bigger hold means they spin expanded longer
+        const expandedDistX = this.distanceX + pulse * w * 0.28;
+        const expandedDistY = this.distanceY + pulse * h * 0.10;
+        // Speed up rotation during hold phase
+        const rotSpeed = this.speed + pulse * 0.008;
+        this.angle += rotSpeed;
         this.wobbleAngle += this.wobbleSpeed;
-        
-        // Add subtle, slow oscillation using a sine wave based on time
-        let oscX = Math.sin(globalTime * this.oscillationSpeedX + this.oscillationPhaseX) * 10;
-        let oscY = Math.cos(globalTime * this.oscillationSpeedY + this.oscillationPhaseY) * 5;
 
-        this.baseX = cx + Math.cos(this.angle) * this.distanceX + oscX;
-        this.baseY = cy + Math.sin(this.angle) * this.distanceY + oscY;
+        const oscX = Math.sin(globalTime * this.oscSpeedX + this.oscPhaseX) * 10;
+        const oscY = Math.cos(globalTime * this.oscSpeedY + this.oscPhaseY) * 3;
+        this.baseX = cx + Math.cos(this.angle) * expandedDistX + oscX;
+        this.baseY = cy + Math.sin(this.angle) * expandedDistY + oscY;
 
-        // Confine base position vertically to ±15% of total height (so they naturally orbit here)
-        const minHeight = h * 0.15;
-        const maxHeight = h * 0.45;
-        if (this.baseY < minHeight) this.baseY = minHeight;
-        if (this.baseY > maxHeight) this.baseY = maxHeight;
+        // Vertical confinement within the section
+        const minY = h * 0.10, maxY = h * 0.68;
+        if (this.baseY < minY) this.baseY = minY;
+        if (this.baseY > maxY) this.baseY = maxY;
 
-        // Subtle rotation/wobble around own axis
-        let targetX = this.baseX + Math.cos(this.wobbleAngle) * 1.5;
-        let targetY = this.baseY + Math.sin(this.wobbleAngle) * 0.75;
+        const targetX = this.baseX + Math.cos(this.wobbleAngle) * 1.5;
+        const targetY = this.baseY + Math.sin(this.wobbleAngle) * 0.5;
 
-        // Mouse interaction (dynamic based on speed)
-        let dx = mouse.x - this.x;
-        let dy = mouse.y - this.y;
         let hue = this.baseHue;
 
-        if (Math.abs(dx) < 1000 && Math.abs(dy) < 1000) {
-          let distanceToMouse = Math.sqrt(dx * dx + dy * dy);
-          
-          // Dynamic radius: Slower = larger radius (pulls more), Faster = smaller radius
-          let activeRadius = Math.max(200, 800 - mouseSpeed * 15);
-          
-          if (distanceToMouse < activeRadius) {
-            let force = Math.pow((activeRadius - distanceToMouse) / activeRadius, 1.5);
-            
-            // Dynamic forces based on speed
-            // Slow: high pull, low swirl. Fast: low pull, high swirl.
-            let pullStrength = Math.max(0.02, 0.2 - mouseSpeed * 0.004); 
-            let swirlStrength = mouseSpeed * 1.5 + 2;
-            
-            // Apply Attraction
-            this.x += dx * force * pullStrength;
-            this.y += dy * force * pullStrength;
-            
-            // Apply Swirl
-            this.x += (dy / distanceToMouse) * force * swirlStrength;
-            this.y -= (dx / distanceToMouse) * force * swirlStrength;
-            
-            // Dynamic Color based on speed
-            let targetHue = 355; // Slow = Red
-            if (mouseSpeed > 5 && mouseSpeed <= 20) {
-               targetHue = 30; // Medium = Orange
-            } else if (mouseSpeed > 20) {
-               targetHue = 50; // Fast = Yellow/Bright
-            }
-            
-            // Smoothly blend hue (treating 355 as -5 to avoid rainbow wrap)
-            let currentBaseHue = this.baseHue === 355 ? -5 : this.baseHue;
-            let currentTargetHue = targetHue === 355 ? -5 : targetHue;
-            
-            let blendedHue = currentBaseHue + (currentTargetHue - currentBaseHue) * force;
-            hue = blendedHue < 0 ? blendedHue + 360 : blendedHue;
-            
-            // Opacity spikes more when fast
-            let opacityBoost = mouseSpeed > 15 ? 1.5 : 0.8;
-            currentOpacity = Math.min(1, currentOpacity + force * opacityBoost);
+        // Mouse interaction (only if mouse is inside section)
+        if (mouse.x > -100 && mouse.y > -100) {
+          const dx = mouse.x - this.x;
+          const dy = mouse.y - this.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const radius = Math.max(180, 700 - mSpeed * 12);
+          if (dist < radius && dist > 0.5) {
+            const force = Math.pow((radius - dist) / radius, 1.5);
+            const pull  = Math.max(0.02, 0.18 - mSpeed * 0.004);
+            const swirl = mSpeed * 1.4 + 2;
+            this.x += dx * force * pull + (dy / dist) * force * swirl;
+            this.y += dy * force * pull - (dx / dist) * force * swirl;
+            // Color shift on speed
+            const th = mSpeed > 20 ? 50 : mSpeed > 5 ? 30 : 355;
+            const bh = this.baseHue === 355 ? -5 : this.baseHue;
+            const tt = th === 355 ? -5 : th;
+            const bld = bh + (tt - bh) * force;
+            hue = bld < 0 ? bld + 360 : bld;
+            opacity = Math.min(1, opacity + force * (mSpeed > 15 ? 1.4 : 0.7));
           } else {
             this.x += (targetX - this.x) * 0.05;
             this.y += (targetY - this.y) * 0.05;
@@ -200,83 +164,65 @@ export function HeroParticles() {
           this.y += (targetY - this.y) * 0.05;
         }
 
-        // Optimization: fillRect instead of arc is massively faster for thousands of tiny particles
-        ctx!.fillStyle = `hsla(${hue}, 100%, 55%, ${currentOpacity})`;
+        ctx!.fillStyle = `hsla(${hue},100%,55%,${opacity.toFixed(3)})`;
         ctx!.fillRect(this.x, this.y, this.size, this.size);
       }
     }
 
-    let particleArray: Particle[] = [];
+    let particles: Particle[] = [];
     function init() {
-      particleArray = [];
-      // Increased particle count for denser look
-      for (let i = 0; i < 6000; i++) {
-        particleArray.push(new Particle(i));
-      }
+      particles = [];
+      const count = isMobile ? 3500 : 7000;
+      for (let i = 0; i < count; i++) particles.push(new Particle(i));
     }
     init();
 
     let rafId: number;
     let time = 0;
+
     function animate() {
       ctx!.clearRect(0, 0, w, h);
-      
-      // Calculate mouse speed
-      if (mouse.x !== -1000 && mouse.prevX !== -1000) {
-        let dx = mouse.x - mouse.prevX;
-        let dy = mouse.y - mouse.prevY;
-        let currentSpeed = Math.sqrt(dx * dx + dy * dy);
-        mouse.speed = mouse.speed * 0.8 + currentSpeed * 0.2;
-      } else {
-        mouse.speed = mouse.speed * 0.9;
-      }
+
+      // Mouse speed
+      if (mouse.x > -100 && mouse.prevX > -100) {
+        const sdx = mouse.x - mouse.prevX;
+        const sdy = mouse.y - mouse.prevY;
+        mouse.speed = mouse.speed * 0.8 + Math.sqrt(sdx*sdx + sdy*sdy) * 0.2;
+      } else { mouse.speed *= 0.9; }
       mouse.prevX = mouse.x;
       mouse.prevY = mouse.y;
 
-      // Use screen for glowing overlap
       ctx!.globalCompositeOperation = 'screen';
-      
-      time += 0.015;
-      // Create a periodic pulse (e.g., every ~4 seconds)
-      // Math.sin(time) goes from -1 to 1. We want a sharp peak.
-      let pulse = Math.pow(Math.max(0, Math.sin(time)), 4); 
-      
-      // Combined update and draw loop for performance
-      for (let i = 0; i < particleArray.length; i++) {
-        let p = particleArray[i];
-        
-        // Temporarily increase speed and distance during the pulse
-        let originalSpeed = p.speed;
-        let originalDistanceX = p.distanceX;
-        let originalDistanceY = p.distanceY;
-        
-        p.speed += (p.speed > 0 ? 1 : -1) * pulse * 0.05;
-        // Massive expansion during the pulse
-        p.distanceX += pulse * (w * 0.3); 
-        p.distanceY += pulse * (h * 0.3); 
-        
-        p.updateAndDraw(time, i, mouse.speed);
-        
-        // Restore
-        p.speed = originalSpeed;
-        p.distanceX = originalDistanceX;
-        p.distanceY = originalDistanceY;
+      time += 0.016;
+
+      const pulse = pulseEnvelope(time);
+
+      for (let i = 0; i < particles.length; i++) {
+        particles[i].draw(time, i, mouse.speed, pulse);
       }
-      
-      // Draw the bright light point (flare) at the origin (VR headset rim)
-      // The flare gets larger and brighter during the pulse
-      let flareRadius = 60 + pulse * 40;
-      let flareOpacity = 0.6 + pulse * 0.4;
-      
-      const flareGradient = ctx!.createRadialGradient(cx, cy, 0, cx, cy, flareRadius);
-      flareGradient.addColorStop(0, `rgba(255, 255, 255, ${flareOpacity})`);
-      flareGradient.addColorStop(0.1, `rgba(255, 200, 100, ${flareOpacity * 0.7})`);
-      flareGradient.addColorStop(0.4, `rgba(232, 39, 42, ${flareOpacity * 0.3})`);
-      flareGradient.addColorStop(1, 'rgba(232, 39, 42, 0)');
-      
-      ctx!.fillStyle = flareGradient;
+
+      // ── FLARE: ponto de luz fixo nos óculos ──────────────────────────────
+      // Tamanho base pequeno, explode durante o burst, fica brilhante no hold
+      const flareR = 20 + pulse * 55;
+      const flareA = 0.35 + pulse * 0.65;
+
+      const fg = ctx!.createRadialGradient(cx, cy, 0, cx, cy, flareR);
+      fg.addColorStop(0,   `rgba(255,255,255,${flareA})`);
+      fg.addColorStop(0.08,`rgba(255,220,120,${flareA * 0.85})`);
+      fg.addColorStop(0.35,`rgba(232,39,42,${flareA * 0.45})`);
+      fg.addColorStop(1,   'rgba(232,39,42,0)');
+
+      ctx!.globalCompositeOperation = 'screen';
+      ctx!.fillStyle = fg;
       ctx!.beginPath();
-      ctx!.arc(cx, cy, flareRadius, 0, Math.PI * 2);
+      ctx!.arc(cx, cy, flareR, 0, Math.PI * 2);
+      ctx!.fill();
+
+      // Tiny bright core that never disappears
+      ctx!.globalCompositeOperation = 'source-over';
+      ctx!.fillStyle = `rgba(255,240,200,${0.15 + pulse * 0.25})`;
+      ctx!.beginPath();
+      ctx!.arc(cx, cy, 2.5, 0, Math.PI * 2);
       ctx!.fill();
 
       rafId = requestAnimationFrame(animate);
@@ -284,17 +230,17 @@ export function HeroParticles() {
     animate();
 
     return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseout', onMouseLeave);
-      window.removeEventListener('resize', onResize);
       cancelAnimationFrame(rafId);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseout',  onMouseLeave);
+      window.removeEventListener('resize',    onResize);
     };
   }, []);
 
   return (
-    <canvas 
-      ref={canvasRef} 
-      className="absolute inset-0 pointer-events-none z-20" 
+    <canvas
+      ref={canvasRef}
+      className="absolute inset-0 pointer-events-none z-20"
     />
   );
 }
